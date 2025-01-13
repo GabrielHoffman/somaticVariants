@@ -12,7 +12,7 @@ output:
 
 <!---
 
-
+system("rm -rf aging_testing_cache/")
 rmarkdown::render("aging_testing.Rmd");
 
 
@@ -45,6 +45,7 @@ library(lmerTest)
 control_data = readRDS("~/Downloads/Aging_data_all_CellType.rds")
 ```
 
+### Somatic variants versus callable sites
 ```{r Callable_Sites}
 ggplot(control_data, aes(Callable_Sites, Count+.5, color=log(no_reads))) +
   geom_point() +
@@ -53,8 +54,15 @@ ggplot(control_data, aes(Callable_Sites, Count+.5, color=log(no_reads))) +
   theme_classic() +
   theme(plot.title = element_text(hjust = 0.5), aspect.ratio=1) +
   facet_wrap(~CellType)
+
+ggplot(control_data, aes(CellType, Callable_Sites)) +
+  geom_violin() +  
+  geom_boxplot(width=.1) +
+  scale_y_log10() +
+  theme(plot.title = element_text(hjust = 0.5), aspect.ratio=1)
 ```
 
+### Fit regression models for each cell type
 ```{r regression}
 ctrl = glmmTMBControl(optimizer=optim, optArgs=list(method="BFGS"))
 
@@ -83,6 +91,7 @@ resList = mclapply( unique(control_data$CellType), function(CT){
 }, mc.cores=6)
 ```
 
+# Hypothesis testing
 ```{r tests}
 resLinear = lapply(resList, function(x){
   df = coef(summary(x$fitLinear))$cond["Age",]
@@ -105,7 +114,6 @@ resLinear %>%
     ggtitle("Linear")
 
 resLinear %>%
-  rename(p.value = Pr...z..) %>%
   mutate( p.value = format(p.value, scientific=TRUE)) %>%
   kbl %>% 
   kable_classic(full_width = FALSE)
@@ -114,7 +122,9 @@ resQuad = lapply(resList, function(x){
   df = coef(summary(x$fitQuad))$cond["Age",]
   data.frame(CellType = x$CellType, t(df))
   })
-resQuad = do.call(rbind, resQuad)
+resQuad = do.call(rbind, resQuad) %>%
+            rename(p.value = Pr...z..) %>%
+            mutate(FDR = p.adjust(p.value, "fdr"))
 
 resQuad %>%
   mutate(CellType = factor(CellType, CellType)) %>%
@@ -126,20 +136,43 @@ resQuad %>%
     theme(aspect.ratio=1, legend.position="none") +
     geom_hline(yintercept=0, linetype="dashed") +
     coord_flip() +
-    ggtitle("Linear")
+    ggtitle("Quadratic")
 
 resQuad %>%
-  rename(p.value = Pr...z..) %>%
   mutate( p.value = format(p.value, scientific=TRUE)) %>%
   kbl %>% 
   kable_classic(full_width = FALSE)
 ```
 
+### Estimate somatic rate per donor
 ```{r ranef}
 df = lapply(resList, function(x){
+
+  # predictions at sample level 
   pred = predict(x$fit0, se.fit = TRUE)
+
+  # predictions at donor level, centered at zero
   ran = ranef(x$fit0, condVar=TRUE)
   se = attr( ran$cond$SubID.x, "condVar")
+  SomaticRate = ran$cond$SubID.x$`(Intercept)`
+
+  # dsgn = model.matrix()
+
+
+  # predictions at donor level, centered at zero
+  SomaticRate = rowSums(coef(x$fit0)$cond$SubID.x) #- fixef(x$fit0)$cond[1]
+  # plot(SomaticRate, ran$cond$SubID.x$`(Intercept)`)
+
+  # newdata = data %>%
+  #           group_by(SubID.x, CellType) %>%
+  #           summarize(no_cells = sum(no_cells), no_reads = sum(no_reads), Callable_Sites = sum(Callable_Sites)) %>%
+  #           filter(CellType == x$CellType)
+
+  # i = match( rownames(ran$cond$SubID.x), newdata$SubID.x)
+  # newdata = newdata[i,]
+
+  # pred = predict(x$fit0, newdata = newdata, se.fit = TRUE)
+  # yhat = pred$fit + ran$cond$SubID.x$`(Intercept)`
 
   i = match(rownames(ran$cond$SubID.x), control_data$SubID.x)
 
@@ -147,7 +180,7 @@ df = lapply(resList, function(x){
         CellType = x$CellType, 
         SubId = rownames(ran$cond$SubID.x),
         Age = control_data$Age[i],
-        SomaticRate = ran$cond$SubID.x$`(Intercept)`,
+        SomaticRate = SomaticRate,
         se = c(attr( ran$cond$SubID.x, "condVar")))
 
   i = match(x$fit0$frame$SubID.x, control_data$SubID.x)
@@ -177,11 +210,13 @@ df %>%
   geom_smooth(method = "lm", se=FALSE) +
   geom_smooth(method = "lm", formula = y ~ x + I(x^2), color="green3", se=FALSE) +
   theme(plot.title = element_text(hjust = 0.5), aspect.ratio=1) +
-  facet_wrap(~CellType) +
+  facet_wrap(~CellType, scale="free_y") +
   scale_color_gradient(low="grey", high="red") +
   ylab("Estimated somatic rate")
 ```
 
+
+### Approximate results with two-step model
 ```{r test.of.ranef}
 resLM = lapply(levels(df$CellType), function(CT){
 
