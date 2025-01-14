@@ -93,6 +93,8 @@ resList = mclapply( unique(control_data$CellType), function(CT){
   fitLinear = update(fitNull, ~ . + Age)
   fitQuad = update(fitLinear, ~ . + I(Age^2))
 
+  fitQuad = update(fitQuad, control=ctrl)
+
   list(CellType = CT, 
         data = data,
         fit0 = fit0, 
@@ -101,6 +103,10 @@ resList = mclapply( unique(control_data$CellType), function(CT){
         fitQuad = fitQuad)
 }, mc.cores=6)
 ```
+
+`form = Count ~ offset(log(Callable_Sites)) + (1|SubID.x) + log(no_cells) + log(no_reads) + PMI  + Sex + Brain_bank + (1|Ethnicity) + VARIABLE`
+
+
 
 # Hypothesis testing
 ```{r tests}
@@ -132,7 +138,7 @@ resLinear %>%
 
 # Test quadratic Age term for each model
 resQuad = lapply(resList, function(x){
-  df = coef(summary(x$fitQuad))$cond["Age",]
+  df = coef(summary(x$fitQuad))$cond["I(Age^2)",]
   data.frame(CellType = x$CellType, t(df))
   })
 resQuad = do.call(rbind, resQuad) %>%
@@ -144,7 +150,7 @@ resQuad %>%
   ggplot(aes(CellType, Estimate, color=CellType)) +
     geom_point() +
     geom_errorbar(aes(ymin = Estimate - 1.96*Std..Error, ymax = Estimate + 1.96*Std..Error), width=0) +
-    geom_text(aes(CellType, .03, label=format(FDR, digits=3)), color="black") +
+    geom_text(aes(CellType, .001, label=format(FDR, digits=3)), color="black") +
     theme_classic() +
     theme(aspect.ratio=1, legend.position="none") +
     geom_hline(yintercept=0, linetype="dashed") +
@@ -242,7 +248,7 @@ resLM = lapply(levels(df$CellType), function(CT){
   df2 = df %>%
     filter(CellType == CT)
 
-  fit = lm(SomaticRate ~ Age, df2, weight = 1/se^2)
+  fit = lm(SomaticRate ~ Age , df2, weight = 1/se^2)
   data.frame(CellType = CT, t(coef(summary(fit))[2,]))
   })
 resLM = do.call(rbind, resLM)
