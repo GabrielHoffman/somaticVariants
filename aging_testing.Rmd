@@ -55,11 +55,12 @@ ggplot(control_data, aes(Callable_Sites, Count+.5, color=log(no_reads))) +
   theme(plot.title = element_text(hjust = 0.5), aspect.ratio=1) +
   facet_wrap(~CellType)
 
-ggplot(control_data, aes(CellType, Callable_Sites)) +
+ggplot(control_data, aes(CellType, Callable_Sites, fill=CellType)) +
   geom_violin() +  
   geom_boxplot(width=.1) +
   scale_y_log10() +
-  theme(plot.title = element_text(hjust = 0.5), aspect.ratio=1)
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5), aspect.ratio=1, legend.position = "none")
 ```
 
 ### Fit regression models for each cell type
@@ -68,16 +69,26 @@ ctrl = glmmTMBControl(optimizer=optim, optArgs=list(method="BFGS"))
 
 resList = mclapply( unique(control_data$CellType), function(CT){
 
+  # Filter data to only Donors with replicates
   keep = control_data$CellType == CT
   data = control_data[keep,]
   tab = table(data$SubID.x)
   include = names(tab)[tab > 1]
   data = data[data$SubID.x %in% include,]
   
-  # glmmTMB
+  # baseline formula
   form = Count ~ offset(log(Callable_Sites)) + (1|SubID.x) + log(no_cells) + log(no_reads)
 
-  fit0 <- glmmTMB(form, family=nbinom2, data, control=ctrl)
+  # fit NB mixed model for baseline model
+  fit0 <- glmmTMB(form, family=nbinom2, data)
+
+  # if model didn't converge, try again with different
+  # optimizer
+  if( fit0$fit$convergence != 0){
+    fit0 = update(fit0, control=ctrl)
+  }
+
+  # fit null model, then linear and quadratic
   fitNull <- update(fit0, ~ . + PMI  + Sex + Brain_bank + (1|Ethnicity))
   fitLinear = update(fitNull, ~ . + Age)
   fitQuad = update(fitLinear, ~ . + I(Age^2))
@@ -93,6 +104,7 @@ resList = mclapply( unique(control_data$CellType), function(CT){
 
 # Hypothesis testing
 ```{r tests}
+# Test linear Age term for each model
 resLinear = lapply(resList, function(x){
   df = coef(summary(x$fitLinear))$cond["Age",]
   data.frame(CellType = x$CellType, t(df))
@@ -118,6 +130,7 @@ resLinear %>%
   kbl %>% 
   kable_classic(full_width = FALSE)
 
+# Test quadratic Age term for each model
 resQuad = lapply(resList, function(x){
   df = coef(summary(x$fitQuad))$cond["Age",]
   data.frame(CellType = x$CellType, t(df))
@@ -145,66 +158,71 @@ resQuad %>%
 ```
 
 ### Estimate somatic rate per donor
+Somatic rate is the number of somatic variants per 1M callable sites, 1M reads and 1K cells.
+
 ```{r ranef}
 df = lapply(resList, function(x){
-
-  # predictions at sample level 
-  pred = predict(x$fit0, se.fit = TRUE)
 
   # predictions at donor level, centered at zero
   ran = ranef(x$fit0, condVar=TRUE)
   se = attr( ran$cond$SubID.x, "condVar")
   SomaticRate = ran$cond$SubID.x$`(Intercept)`
 
-  # dsgn = model.matrix()
+  # baseline somatic rate based on cells, reads and callable sites
+  no_cells = 1000
+  no_reads = 1000000
+  Callable_Sites = 1000000
+  baseline = fixef(x$fit0)$cond %*% c(intercept = 1,log(no_cells),log(no_reads)) + log(Callable_Sites)
+  baseline = c(baseline)
 
-
-  # predictions at donor level, centered at zero
-  SomaticRate = rowSums(coef(x$fit0)$cond$SubID.x) #- fixef(x$fit0)$cond[1]
-  # plot(SomaticRate, ran$cond$SubID.x$`(Intercept)`)
-
-  # newdata = data %>%
-  #           group_by(SubID.x, CellType) %>%
-  #           summarize(no_cells = sum(no_cells), no_reads = sum(no_reads), Callable_Sites = sum(Callable_Sites)) %>%
-  #           filter(CellType == x$CellType)
-
-  # i = match( rownames(ran$cond$SubID.x), newdata$SubID.x)
-  # newdata = newdata[i,]
-
-  # pred = predict(x$fit0, newdata = newdata, se.fit = TRUE)
-  # yhat = pred$fit + ran$cond$SubID.x$`(Intercept)`
+  SomaticRate = SomaticRate + baseline
 
   i = match(rownames(ran$cond$SubID.x), control_data$SubID.x)
 
-  df_ranef = data.frame(Method = "ranef", 
+  data.frame(
         CellType = x$CellType, 
         SubId = rownames(ran$cond$SubID.x),
         Age = control_data$Age[i],
         SomaticRate = SomaticRate,
         se = c(attr( ran$cond$SubID.x, "condVar")))
-
-  i = match(x$fit0$frame$SubID.x, control_data$SubID.x)
-
-  df_pred = data.frame(Method = "pred", 
-        CellType = x$CellType, 
-        SubId = x$fit0$frame$SubID.x,
-        Age = control_data$Age[i],
-        SomaticRate = pred$fit,
-        se = pred$se.fit)
-
-  rbind(df_pred, df_ranef)
   })
 df = do.call(rbind, df)
 df = df %>% 
-  filter( CellType != "Immune") %>%
   droplevels %>%
   mutate(CellType = factor(CellType, sort(levels(CellType))))
 ```
 
+
 ```{r plots.ranef}
-df %>%
-  filter( Method == "ranef") %>%
+df %>% 
+  ggplot(aes(Age, SomaticRate)) +
+  geom_point(aes(color=se)) +
+  theme_classic() +
+  geom_smooth(method = "lm", se=FALSE) +
+  geom_smooth(method = "lm", formula = y ~ x + I(x^2), color="green3", se=FALSE) +
+  theme(plot.title = element_text(hjust = 0.5), aspect.ratio=1) +
+  facet_wrap(~CellType) +
+  scale_color_gradient(low="grey", high="red") +
+  ylab("Estimated somatic rate")
+```
+
+#### Including standard error of the somatic rate 
+```{r plots.ranef.weights}
+df %>% 
   ggplot(aes(Age, SomaticRate, weight=1/se^2)) +
+  geom_point(aes(color=se)) +
+  theme_classic() +
+  geom_smooth(method = "lm", se=FALSE) +
+  geom_smooth(method = "lm", formula = y ~ x + I(x^2), color="green3", se=FALSE) +
+  theme(plot.title = element_text(hjust = 0.5), aspect.ratio=1) +
+  facet_wrap(~CellType) +
+  scale_color_gradient(low="grey", high="red") +
+  ylab("Estimated somatic rate")
+```
+
+```{r plots.ranef.weights.scale, fig.width=10, fig.height=5}
+df %>% 
+  ggplot(aes(Age, SomaticRate, weight=1/se^2, size=1/se^2)) +
   geom_point(aes(color=se)) +
   theme_classic() +
   geom_smooth(method = "lm", se=FALSE) +
@@ -212,7 +230,8 @@ df %>%
   theme(plot.title = element_text(hjust = 0.5), aspect.ratio=1) +
   facet_wrap(~CellType, scale="free_y") +
   scale_color_gradient(low="grey", high="red") +
-  ylab("Estimated somatic rate")
+  ylab("Estimated somatic rate") +
+  scale_size(range=c(.1, 4))
 ```
 
 
@@ -221,7 +240,7 @@ df %>%
 resLM = lapply(levels(df$CellType), function(CT){
 
   df2 = df %>%
-    filter(CellType == CT, Method == "ranef")
+    filter(CellType == CT)
 
   fit = lm(SomaticRate ~ Age, df2, weight = 1/se^2)
   data.frame(CellType = CT, t(coef(summary(fit))[2,]))
